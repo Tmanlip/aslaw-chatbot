@@ -1,10 +1,14 @@
+import 'dotenv/config';
 import express from 'express';
 import ollama from 'ollama';
 import { classifierPrompt, getASLAWPrompt, routeModel } from './logic.js';
+import { getDatabaseHealth, initializeDatabases, saveChat, findChats } from './database.js';
 
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
+
+await initializeDatabases();
 
 // ------------------------------------
 // 🔥 Warm up base model once at startup
@@ -19,6 +23,67 @@ console.log("Model ready!");
 
 app.get('/', (req, res) => {
   res.send('<h1>ASLAW Chatbot Server is Running!</h1><p>Send a POST request to /ask to chat.</p>');
+});
+
+app.get('/db-health', (req, res) => {
+  res.json(getDatabaseHealth());
+});
+
+// ====================================
+// 💾 SAVE CHAT ENDPOINT
+// ====================================
+app.post('/save-chat', async (req, res) => {
+  const { question, answers, model, category } = req.body;
+
+  if (!question || !answers || !model) {
+    return res.status(400).json({ 
+      error: "Missing required fields: question, answers, model" 
+    });
+  }
+
+  try {
+    const result = await saveChat({
+      question,
+      answers,
+      model,
+      category,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Chat saved successfully",
+      chatId: result.insertedId
+    });
+  } catch (error) {
+    console.error("Error saving chat:", error);
+    res.status(400).json({ 
+      error: error.message || "Failed to save chat. Check schema validation."
+    });
+  }
+});
+
+// ====================================
+// 🔍 RETRIEVE CHATS ENDPOINT
+// ====================================
+app.get('/chats', async (req, res) => {
+  const { model, category, limit = 10 } = req.query;
+  
+  try {
+    const query = {};
+    if (model) query.model = model;
+    if (category) query.category = category;
+
+    const chats = await findChats(query);
+    res.json({
+      count: chats.length,
+      chats: chats.slice(0, parseInt(limit))
+    });
+  } catch (error) {
+    console.error("Error retrieving chats:", error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post('/ask', async (req, res) => {
@@ -81,22 +146,66 @@ app.post('/ask', async (req, res) => {
     // =====================
     // 2️⃣ FINAL ANSWER CALL
     // =====================
-    const aslawResponse = await ollama.chat({
-      model: model,
-      messages: [
-        { role: "system", content: getASLAWPrompt(category, question) },
-        { role: "user", content: question }
-      ],
-      options: {
-        temperature: 0.2,
-        num_predict: 250
-      }
-    });
+    const systemPrompt = getASLAWPrompt(category, question);
+    const conversation = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: question }
+    ];
 
-    res.json({
-      answer: aslawResponse?.message?.content || "No response generated.",
-      category
-    });
+    let finalAnswer = "";
+    let aslawResponse = null;
+
+    // Try once, then continue once more if generation stopped due to length.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      aslawResponse = await ollama.chat({
+        model: model,
+        messages: conversation,
+        options: {
+          temperature: 0.2,
+          num_predict: 600
+        }
+      });
+
+      const chunk = aslawResponse?.message?.content || "";
+      finalAnswer += (finalAnswer ? "\n\n" : "") + chunk;
+
+      if (aslawResponse?.done_reason !== "length") {
+        break;
+      }
+
+      conversation.push({ role: "assistant", content: chunk });
+      conversation.push({
+        role: "user",
+        content: "Continue from where you stopped. Do not repeat earlier points. Finish with a short safety reminder."
+      });
+    }
+
+    const responseData = {
+      answer: finalAnswer || "No response generated.",
+      category,
+      model
+    };
+
+    // Save every ask request automatically
+    try {
+      const chatResult = await saveChat({
+        question,
+        answers: finalAnswer,
+        model,
+        category,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      responseData.chatId = chatResult.insertedId;
+      responseData.saved = true;
+      console.log("Chat saved with ID:", chatResult.insertedId);
+    } catch (saveError) {
+      console.error("Warning: Could not save chat:", saveError.message);
+      responseData.saved = false;
+      responseData.saveError = saveError.message;
+    }
+
+    res.json(responseData);
 
   } catch (error) {
     console.error("ERROR:", error);

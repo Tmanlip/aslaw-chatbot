@@ -10,8 +10,11 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "dotenv": "^17.3.1",
     "express": "^5.2.1",
-    "ollama": "^0.6.3"
+    "mongodb": "^7.1.0",
+    "ollama": "^0.6.3",
+    "pg": "^8.20.0"
   },
   "type": "module"
 }
