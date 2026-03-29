@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "main": "classifier-test.js",
   "scripts": {
+    "start": "set CHATBOT_PORT=3001&& node server.js",
+    "rag:ingest": "node scripts/ingest-rag.js",
+    "rag:ingest:azure": "node scripts/ingest-rag.js --source azure",
+    "rag:preview": "node scripts/preview-rag.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -10,10 +14,12 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@azure/storage-blob": "^12.29.1",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "mongodb": "^7.1.0",
     "ollama": "^0.6.3",
+    "pdf-parse": "^1.1.1",
     "pg": "^8.20.0"
   },
   "type": "module"

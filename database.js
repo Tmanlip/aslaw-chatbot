@@ -19,6 +19,96 @@ const dbHealth = {
 let mongoClient = null;
 let mongoDb = null;
 let postgresPool = null;
+const DEFAULT_CHAT_COLLECTION = 'chatbot-question-answer';
+
+function sanitizeFirmId(firmID) {
+  if (!firmID) return null;
+  const raw = String(firmID).trim();
+  if (!raw) return null;
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function getCollectionNameByFirm(firmID) {
+  const safeFirmID = sanitizeFirmId(firmID);
+  return safeFirmID ? `chat_${safeFirmID}` : DEFAULT_CHAT_COLLECTION;
+}
+
+async function collectionExists(collectionName) {
+  if (!mongoDb) {
+    throw new Error('MongoDB is not connected.');
+  }
+
+  const cursor = mongoDb.listCollections({ name: collectionName }, { nameOnly: true });
+  return cursor.hasNext();
+}
+
+function getChatValidatorSchema() {
+  return {
+    $jsonSchema: {
+      bsonType: 'object',
+      required: ['question', 'answers', 'model'],
+      properties: {
+        _id: { bsonType: 'objectId' },
+        question: {
+          bsonType: 'string',
+          description: 'User question - must be a string'
+        },
+        answers: {
+          bsonType: 'string',
+          description: 'Generated answer from the model - must be a string'
+        },
+        model: {
+          bsonType: 'string',
+          enum: ['aslaw-civil', 'aslaw-corporate', 'aslaw-criminal', 'aslaw-general'],
+          description: 'Model used for this chat - must be one of the ASLAW models'
+        },
+        category: {
+          bsonType: 'string',
+          enum: ['civil', 'corporate', 'criminal', 'general'],
+          description: 'Category of the question (optional)'
+        },
+        firmID: {
+          bsonType: 'string',
+          description: 'Firm ID of the logged in user (optional)'
+        },
+        createdAt: {
+          bsonType: 'date',
+          description: 'Timestamp when chat was created (optional)'
+        },
+        updatedAt: {
+          bsonType: 'date',
+          description: 'Timestamp when chat was last updated (optional)'
+        }
+      }
+    }
+  };
+}
+
+async function ensureChatCollectionValidation(collectionName) {
+  if (!mongoDb) {
+    throw new Error('MongoDB is not connected.');
+  }
+
+  try {
+    await mongoDb.command({
+      collMod: collectionName,
+      validator: getChatValidatorSchema(),
+      validationLevel: 'strict',
+      validationAction: 'error'
+    });
+  } catch (error) {
+    if (error.codeName === 'NamespaceNotFound') {
+      await mongoDb.createCollection(collectionName, {
+        validator: getChatValidatorSchema(),
+        validationLevel: 'strict',
+        validationAction: 'error'
+      });
+      console.log(`Created chats collection with schema validation: ${collectionName}`);
+    } else {
+      console.error(`Error setting up chat validation (${collectionName}):`, error.message);
+    }
+  }
+}
 
 export async function initializeDatabases() {
   const mongoUri = process.env.MONGODB_URI;
@@ -94,96 +184,8 @@ export async function setupChatValidation() {
     throw new Error('MongoDB is not connected.');
   }
 
-  try {
-    // Create or update collection with schema validation
-    await mongoDb.command({
-      collMod: 'chatbot-question-answer',
-      validator: {
-        $jsonSchema: {
-          bsonType: 'object',
-          required: ['question', 'answers', 'model'],
-          properties: {
-            _id: { bsonType: 'objectId' },
-            question: {
-              bsonType: 'string',
-              description: 'User question - must be a string'
-            },
-            answers: {
-              bsonType: 'string',
-              description: 'Generated answer from the model - must be a string'
-            },
-            model: {
-              bsonType: 'string',
-              enum: ['aslaw-civil', 'aslaw-corporate', 'aslaw-criminal', 'aslaw-general'],
-              description: 'Model used for this chat - must be one of the ASLAW models'
-            },
-            category: {
-              bsonType: 'string',
-              enum: ['civil', 'corporate', 'criminal', 'general'],
-              description: 'Category of the question (optional)'
-            },
-            createdAt: {
-              bsonType: 'date',
-              description: 'Timestamp when chat was created (optional)'
-            },
-            updatedAt: {
-              bsonType: 'date',
-              description: 'Timestamp when chat was last updated (optional)'
-            }
-          }
-        }
-      },
-      validationLevel: 'strict',
-      validationAction: 'error'
-    });
-    console.log('MongoDB schema validation set for chats collection');
-  } catch (error) {
-    // Collection might not exist yet, create it
-    if (error.codeName === 'NamespaceNotFound') {
-      const collection = await mongoDb.createCollection('chatbot-question-answer', {
-        validator: {
-          $jsonSchema: {
-            bsonType: 'object',
-            required: ['question', 'answers', 'model'],
-            properties: {
-              _id: { bsonType: 'objectId' },
-              question: {
-                bsonType: 'string',
-                description: 'User question - must be a string'
-              },
-              answers: {
-                bsonType: 'string',
-                description: 'Generated answer from the model - must be a string'
-              },
-              model: {
-                bsonType: 'string',
-                enum: ['aslaw-civil', 'aslaw-corporate', 'aslaw-criminal', 'aslaw-general'],
-                description: 'Model used for this chat - must be one of the ASLAW models'
-              },
-              category: {
-                bsonType: 'string',
-                enum: ['civil', 'corporate', 'criminal', 'general'],
-                description: 'Category of the question (optional)'
-              },
-              createdAt: {
-                bsonType: 'date',
-                description: 'Timestamp when chat was created (optional)'
-              },
-              updatedAt: {
-                bsonType: 'date',
-                description: 'Timestamp when chat was last updated (optional)'
-              }
-            }
-          }
-        },
-        validationLevel: 'strict',
-        validationAction: 'error'
-      });
-      console.log('Created chats collection with schema validation');
-    } else {
-      console.error('Error setting up chat validation:', error.message);
-    }
-  }
+  await ensureChatCollectionValidation(DEFAULT_CHAT_COLLECTION);
+  console.log(`MongoDB schema validation set for chats collection: ${DEFAULT_CHAT_COLLECTION}`);
 }
 
 /**
@@ -191,12 +193,15 @@ export async function setupChatValidation() {
  * @param {Object} chatData - { question, answers, model, category, createdAt, updatedAt }
  * @returns {Object} Result with insertedId
  */
-export async function saveChat(chatData) {
+export async function saveChat(chatData, options = {}) {
   if (!mongoDb) {
     throw new Error('MongoDB is not connected.');
   }
 
-  const chatsCollection = mongoDb.collection('chatbot-question-answer');
+  const { firmID } = options;
+  const collectionName = getCollectionNameByFirm(firmID);
+  await ensureChatCollectionValidation(collectionName);
+  const chatsCollection = mongoDb.collection(collectionName);
   
   // Ensure required fields are present
   if (!chatData.question || !chatData.answers || !chatData.model) {
@@ -206,6 +211,7 @@ export async function saveChat(chatData) {
   // Add timestamps if not provided
   const documentToInsert = {
     ...chatData,
+    ...(firmID ? { firmID: String(firmID) } : {}),
     createdAt: chatData.createdAt || new Date(),
     updatedAt: chatData.updatedAt || new Date()
   };
@@ -219,12 +225,23 @@ export async function saveChat(chatData) {
  * @param {Object} query - MongoDB query object
  * @returns {Array} Array of chat documents
  */
-export async function findChats(query = {}) {
+export async function findChats(query = {}, options = {}) {
   if (!mongoDb) {
     throw new Error('MongoDB is not connected.');
   }
 
-  const chatsCollection = mongoDb.collection('chatbot-question-answer');
+  const { firmID } = options;
+  const collectionName = getCollectionNameByFirm(firmID);
+
+  // For internal firm collections: if it does not exist yet, return empty list.
+  if (firmID) {
+    const exists = await collectionExists(collectionName);
+    if (!exists) {
+      return [];
+    }
+  }
+
+  const chatsCollection = mongoDb.collection(collectionName);
   const chats = await chatsCollection.find(query).toArray();
   return chats;
 }
